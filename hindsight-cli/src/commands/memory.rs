@@ -12,7 +12,7 @@ use crate::ui;
 // Import types from generated client
 use hindsight_client::types::{
     Budget, ChunkIncludeOptions, FactsIncludeOptions, IncludeOptions, ReflectIncludeOptions,
-    TagsMatch, TemporalWindow,
+    TagGroupsItem, TagsMatch, TemporalWindow,
 };
 use serde::Deserialize;
 use serde_json;
@@ -45,7 +45,6 @@ fn parse_budget(budget: &str) -> Budget {
     }
 }
 
-// Helper function to parse tags_match string to TagsMatch enum
 /// Build the recall temporal window from --window-start / --window-end.
 ///
 /// Both ends are required: one alone is an incomplete range, not a half-open
@@ -91,18 +90,22 @@ fn parse_window_bound(value: &str, flag: &str) -> Result<DateTime<Utc>> {
     ))
 }
 
-fn parse_tags_match(tags_match: &Option<String>) -> TagsMatch {
-    match tags_match
-        .as_deref()
-        .unwrap_or("any")
-        .to_lowercase()
-        .as_str()
-    {
-        "all" => TagsMatch::All,
-        "any_strict" => TagsMatch::AnyStrict,
-        "all_strict" => TagsMatch::AllStrict,
-        _ => TagsMatch::Any,
-    }
+fn parse_tags_match(tags_match: &Option<String>) -> Result<TagsMatch> {
+    let value = tags_match.as_deref().unwrap_or("any").to_lowercase();
+    value.parse().map_err(|_| {
+        anyhow!(
+            "invalid --tags-match '{value}': expected one of any, all, any_strict, all_strict, exact"
+        )
+    })
+}
+
+fn parse_tag_groups(tag_groups: Option<String>) -> Result<Option<Vec<TagGroupsItem>>> {
+    tag_groups
+        .map(|value| {
+            serde_json::from_str(&value)
+                .context("invalid --tag-groups: expected a JSON array of tag filters")
+        })
+        .transpose()
 }
 
 /// List memory units with pagination and optional filters
@@ -317,6 +320,7 @@ pub fn recall(
     chunk_max_tokens: i64,
     tags: Vec<String>,
     tags_match: Option<String>,
+    tag_groups: Option<String>,
     query_timestamp: Option<String>,
     prefer_observations: Option<bool>,
     window_start: Option<String>,
@@ -362,8 +366,8 @@ pub fn recall(
         rerank: None,
         include,
         tags: if tags.is_empty() { None } else { Some(tags) },
-        tags_match: parse_tags_match(&tags_match),
-        tag_groups: None,
+        tags_match: parse_tags_match(&tags_match)?,
+        tag_groups: parse_tag_groups(tag_groups)?,
         min_scores: None,
         temporal_window,
     };
@@ -398,6 +402,7 @@ pub fn reflect(
     schema_path: Option<PathBuf>,
     tags: Vec<String>,
     tags_match: Option<String>,
+    tag_groups: Option<String>,
     include_facts: bool,
     fact_types: Option<Vec<String>>,
     exclude_mental_models: bool,
@@ -455,8 +460,8 @@ pub fn reflect(
         include,
         response_schema,
         tags: if tags.is_empty() { None } else { Some(tags) },
-        tags_match: parse_tags_match(&tags_match),
-        tag_groups: None,
+        tags_match: parse_tags_match(&tags_match)?,
+        tag_groups: parse_tag_groups(tag_groups)?,
         apply_all_directives: false,
         fact_types: mapped_fact_types,
         exclude_mental_models,
@@ -889,6 +894,47 @@ mod tests {
 
     fn some(value: &str) -> Option<String> {
         Some(value.to_string())
+    }
+
+    #[test]
+    fn test_parse_tags_match_preserves_all_modes_and_rejects_typos() {
+        assert!(matches!(parse_tags_match(&None).unwrap(), TagsMatch::Any));
+        for mode in ["any", "all", "any_strict", "all_strict", "exact"] {
+            let parsed = parse_tags_match(&some(&mode.to_uppercase())).unwrap();
+            assert_eq!(serde_json::to_value(parsed).unwrap(), mode);
+        }
+        assert!(parse_tags_match(&some("excat")).is_err());
+        assert!(parse_tags_match(&some("")).is_err());
+    }
+
+    #[test]
+    fn test_parse_tag_groups_preserves_nested_boolean_filters() {
+        let value = serde_json::json!([{
+            "or": [
+                {"tags": ["user:kate"], "match": "all_strict", "resolve": "exact"},
+                {"and": [
+                    {"tags": ["group:engineering"], "match": "exact", "resolve": "exact"},
+                    {"not": {"tags": ["archived"], "match": "any_strict", "resolve": "fuzzy"}}
+                ]}
+            ]
+        }]);
+        let parsed = parse_tag_groups(Some(value.to_string())).unwrap().unwrap();
+        assert_eq!(serde_json::to_value(parsed).unwrap(), value);
+        assert!(parse_tag_groups(None).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_parse_tag_groups_rejects_invalid_filters() {
+        for value in [
+            "not json",
+            "null",
+            "{}",
+            "[{}]",
+            r#"[{"tags":[42]}]"#,
+            r#"[{"or":[{"tags":["user:kate"],"match":"excat"}]}]"#,
+        ] {
+            assert!(parse_tag_groups(some(value)).is_err(), "accepted {value}");
+        }
     }
 
     #[test]
