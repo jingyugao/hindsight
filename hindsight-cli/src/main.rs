@@ -568,9 +568,13 @@ enum MemoryCommands {
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
 
-        /// Tag matching mode: any, all, any_strict, all_strict (default: any)
+        /// Tag matching mode: any, all, any_strict, all_strict, exact (default: any)
         #[arg(long)]
         tags_match: Option<String>,
+
+        /// Compound tag filter as a JSON array of leaf, and, or, or not groups
+        #[arg(long, conflicts_with_all = ["tags", "tags_match"])]
+        tag_groups: Option<String>,
 
         /// Reference timestamp for recall (ISO 8601, e.g. 2023-05-30T23:40:00)
         #[arg(long)]
@@ -617,9 +621,13 @@ enum MemoryCommands {
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
 
-        /// Tag matching mode: any, all, any_strict, all_strict (default: any)
+        /// Tag matching mode: any, all, any_strict, all_strict, exact (default: any)
         #[arg(long)]
         tags_match: Option<String>,
+
+        /// Compound tag filter as a JSON array of leaf, and, or, or not groups
+        #[arg(long, conflicts_with_all = ["tags", "tags_match"])]
+        tag_groups: Option<String>,
 
         /// Include source facts (based_on) in the response
         #[arg(long)]
@@ -1764,6 +1772,7 @@ fn run() -> Result<()> {
                 chunk_max_tokens,
                 tags,
                 tags_match,
+                tag_groups,
                 query_timestamp,
                 prefer_observations,
                 window_start,
@@ -1780,6 +1789,7 @@ fn run() -> Result<()> {
                 chunk_max_tokens,
                 tags,
                 tags_match,
+                tag_groups,
                 query_timestamp,
                 prefer_observations,
                 window_start,
@@ -1796,6 +1806,7 @@ fn run() -> Result<()> {
                 schema,
                 tags,
                 tags_match,
+                tag_groups,
                 include_facts,
                 fact_types,
                 exclude_mental_models,
@@ -1810,6 +1821,7 @@ fn run() -> Result<()> {
                 schema,
                 tags,
                 tags_match,
+                tag_groups,
                 include_facts,
                 fact_types,
                 exclude_mental_models,
@@ -2668,8 +2680,62 @@ fn handle_profile(cmd: ProfileCommands, output_format: OutputFormat) -> Result<(
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Commands, OperationCommands};
+    use super::{Cli, Commands, MemoryCommands, OperationCommands};
     use clap::Parser;
+
+    #[test]
+    fn memory_commands_accept_compound_tag_filters() {
+        let groups =
+            r#"[{"or":[{"tags":["user:kate"]},{"tags":["scope:global"],"match":"exact"}]}]"#;
+        for command in ["recall", "reflect"] {
+            let cli = Cli::try_parse_from([
+                "hindsight",
+                "memory",
+                command,
+                "bank-1",
+                "question",
+                "--tag-groups",
+                groups,
+            ])
+            .unwrap();
+            match cli.command {
+                Commands::Memory(MemoryCommands::Recall {
+                    tag_groups,
+                    tags_match,
+                    ..
+                })
+                | Commands::Memory(MemoryCommands::Reflect {
+                    tag_groups,
+                    tags_match,
+                    ..
+                }) => {
+                    assert_eq!(tag_groups.as_deref(), Some(groups));
+                    assert!(tags_match.is_none());
+                }
+                _ => panic!("expected memory {command}"),
+            }
+        }
+    }
+
+    #[test]
+    fn memory_commands_reject_flat_filters_with_tag_groups() {
+        for command in ["recall", "reflect"] {
+            for flat_filter in [["--tags", "user:kate"], ["--tags-match", "exact"]] {
+                assert!(Cli::try_parse_from([
+                    "hindsight",
+                    "memory",
+                    command,
+                    "bank-1",
+                    "question",
+                    flat_filter[0],
+                    flat_filter[1],
+                    "--tag-groups",
+                    "[]",
+                ])
+                .is_err());
+            }
+        }
+    }
 
     #[test]
     fn parses_operation_delete_with_confirmation_bypass() {
